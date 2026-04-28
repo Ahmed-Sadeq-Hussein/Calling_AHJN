@@ -1,0 +1,7 @@
+
+# We ignore config file here
+/config.py
+# We also ignore all folders, with no exceptions 
+/*/
+# This is due to the fact that we have multiple folders for the target voices and we do not want to accidentally add them to the repository. 
+#
