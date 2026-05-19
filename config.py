@@ -7,3 +7,9 @@ experiment_name = "Experiment_1"
 # Here we insert metadata into the recording in order to identify the voice to make sure no mix up happens for training purposes 
 training_voice_metadata = "Training_Voice" + experiment_name
 # Here we insert metadata into the recording in order to identify the voice to make sure no mix
+
+
+
+# Resemblyzer global variables 
+cross_examination_folder = "Cross_Examination" # Folder containing audioes. Put files to compare and it will compare in a heatmap. 
+Resemble_threshold = 0.75 # Cosine score at/above which speakers are judged the same. Resemblyzer scores run high; 0.75 is a typical starting point.

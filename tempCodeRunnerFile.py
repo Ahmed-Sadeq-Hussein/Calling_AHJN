@@ -1,0 +1,1 @@
+pip install resemblyzer librosa soundfile matplotlib numpy
