@@ -1,7 +1,54 @@
 
-# We ignore config file here
+# ── Config (per-user, never commit) ───────────────────────────────────────────
 /config.py
-# We also ignore all folders, with no exceptions 
+
+# ── All subdirectories (covers data/, models/, nvidia_fastpitch/, Cross_Examination/, etc.)
+# Large datasets, audio, checkpoints, and caches all live in subfolders.
 /*/
-# This is due to the fact that we have multiple folders for the target voices and we do not want to accidentally add them to the repository. 
-#
+
+# ── Large file types that could accidentally land at repo root ─────────────────
+# Audio
+*.wav
+*.mp3
+*.mp4
+*.m4a
+*.flac
+*.ogg
+*.opus
+*.aac
+
+# Model checkpoints / weights
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+*.onnx
+
+# Numpy / feature arrays
+*.npy
+*.npz
+
+# HuggingFace / datasets cache
+*.arrow
+*.parquet
+
+# Archives
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.7z
+
+# ── Python artifacts ───────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+.eggs/
+*.egg-info/
+
+# ── Editor / OS ────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db

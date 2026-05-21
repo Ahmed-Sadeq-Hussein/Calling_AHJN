@@ -5,4 +5,4 @@ Authors : Ahmed Sadeq Hussein and Julius Norén
 
 
 
-Step 1 . Download LJSpeech and train a model from scratch on it . Data will be stored within the path of a config file that is meant to be edited by the user
+Step 1 . Download LJSpeech(or Emilia) and train a model from scratch on it . Data will be stored within the path of a config file that is meant to be edited by the user
