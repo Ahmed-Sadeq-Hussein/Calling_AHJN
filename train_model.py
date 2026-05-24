@@ -32,6 +32,7 @@ from pathlib import Path
 
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")  # reduces fragmentation OOM
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
@@ -216,9 +217,10 @@ def run_training(resume: bool, epochs: int, lr: float,
         "--batch_size_type",      "sample",   # 'sample' = N clips/step; 'frame' = N mel frames/step
         "--epochs",               str(epochs),
         "--num_warmup_updates",   "500",
-        "--save_per_updates",     str(save_every),
-        "--last_per_updates",     str(save_every),  # same cadence — 0 causes divide-by-zero
-        "--finetune",                          # start from pretrained checkpoint
+        "--save_per_updates",          str(save_every),
+        "--last_per_updates",          str(save_every),  # same cadence — 0 causes divide-by-zero
+        "--keep_last_n_checkpoints",   "2",              # only keep 2 — prevents disk filling
+        "--finetune",                                     # start from pretrained checkpoint
         "--tokenizer",            "custom",    # use vocab.txt directly
         "--tokenizer_path",       vocab_path,
         # --logger omitted → defaults to None (no logging)
@@ -290,8 +292,8 @@ def main() -> None:
         "--lr", type=float, default=5e-6,
         help="Learning rate (default 5e-6, lower than scratch to avoid forgetting)")
     parser.add_argument(
-        "--batch-size", type=int, default=8,
-        help="Clips per GPU per step (default 8 — reduce to 4 on OOM)")
+        "--batch-size", type=int, default=2,
+        help="Clips per GPU per step (default 2 — safe for 10GB VRAM with long LibriTTS clips)")
     parser.add_argument(
         "--save-every", type=int, default=1000,
         help="Save a checkpoint every N gradient updates (default 1000)")

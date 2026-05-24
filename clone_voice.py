@@ -30,6 +30,7 @@ from __future__ import annotations
 import os
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")   # prevents LLVM SVML crash on Windows
 
 import sys, argparse
 from pathlib import Path
@@ -203,7 +204,8 @@ def split_sentences(text: str) -> list[str]:
 
 def infer(reference_path: Path, ref_text: str, gen_text: str,
           out_path: Path, checkpoint: str | None,
-          speed: float, seed: int, nfe_steps: int) -> None:
+          speed: float, seed: int, nfe_steps: int,
+          t_script_start: float) -> None:
     """
     Run F5-TTS zero-shot cloning.
 
@@ -215,7 +217,9 @@ def infer(reference_path: Path, ref_text: str, gen_text: str,
     speed          : playback speed multiplier (1.0 = normal)
     seed           : RNG seed for reproducibility (-1 = random)
     nfe_steps      : diffusion steps — more = slower but slightly better (16–32)
+    t_script_start : time.perf_counter() value from the top of main()
     """
+    import time
     try:
         import numpy as np
         import soundfile as sf
@@ -233,7 +237,11 @@ def infer(reference_path: Path, ref_text: str, gen_text: str,
     ckpt_file = checkpoint if checkpoint else ""
 
     print(f"Loading F5-TTS model {'(fine-tuned)' if ckpt_file else '(pretrained)'}…")
+    t_load_start = time.perf_counter()
     tts = F5TTS(ckpt_file=ckpt_file)
+    t_load_end = time.perf_counter()
+    print(f"  Model loaded in {t_load_end - t_load_start:.1f}s")
+    print()
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -247,6 +255,8 @@ def infer(reference_path: Path, ref_text: str, gen_text: str,
     # sequences. Splitting into individual sentences keeps each inference call
     # within the model's comfortable range, then we stitch the pieces together.
     sentences = split_sentences(gen_text)
+
+    t_infer_start = time.perf_counter()
 
     if len(sentences) <= 1:
         # Single sentence — generate directly
@@ -262,10 +272,12 @@ def infer(reference_path: Path, ref_text: str, gen_text: str,
     else:
         print(f"  Splitting into {len(sentences)} sentence(s) for clean generation…")
         waves = []
+        sentence_times = []
         sample_rate = None
         silence_gap = 0.18   # seconds of silence between sentences
 
         for i, sentence in enumerate(sentences):
+            t_sent_start = time.perf_counter()
             print(f"  [{i+1}/{len(sentences)}] \"{sentence}\"")
             wav_i, sr_i, _ = tts.infer(
                 ref_file=str(reference_path),
@@ -276,7 +288,14 @@ def infer(reference_path: Path, ref_text: str, gen_text: str,
                 seed=seed if seed != -1 else None,
                 nfe_step=nfe_steps,
             )
+            t_sent_end = time.perf_counter()
             wav_i = trim_and_fade(wav_i, sr_i)
+            sent_duration = len(wav_i) / sr_i
+            sent_infer    = t_sent_end - t_sent_start
+            sentence_times.append((sentence, sent_infer, sent_duration))
+            print(f"      {sent_infer:.1f}s to generate  "
+                  f"→  {sent_duration:.1f}s audio  "
+                  f"(RTF {sent_infer / sent_duration:.2f})")
             waves.append(wav_i)
             sample_rate = sr_i
 
@@ -292,8 +311,31 @@ def infer(reference_path: Path, ref_text: str, gen_text: str,
         sr  = sample_rate
         sf.write(str(out_path), wav, sr)
 
-    duration_s = len(wav) / sr
-    print(f"Saved  : {out_path}  ({duration_s:.1f}s  @ {sr} Hz)")
+    t_done = time.perf_counter()
+
+    # ── Latency report ────────────────────────────────────────────────────────
+    audio_duration  = len(wav) / sr
+    infer_time      = t_done - t_infer_start
+    total_time      = t_done - t_script_start
+    model_load_time = t_load_end - t_load_start
+    rtf             = infer_time / audio_duration
+
+    print()
+    print("─" * 50)
+    print("  LATENCY REPORT")
+    print("─" * 50)
+    print(f"  Model load time   : {model_load_time:.2f}s")
+    print(f"  Inference time    : {infer_time:.2f}s")
+    print(f"  Total wall-clock  : {total_time:.2f}s")
+    print(f"  Output duration   : {audio_duration:.2f}s")
+    print(f"  Real-time factor  : {rtf:.3f}x  "
+          f"({'faster' if rtf < 1 else 'slower'} than real-time)")
+    print(f"  Sentences         : {len(sentences)}")
+    print(f"  NFE steps         : {nfe_steps}")
+    print(f"  Checkpoint        : {'fine-tuned' if checkpoint else 'pretrained base'}")
+    print("─" * 50)
+    print(f"  Saved : {out_path}")
+    print("─" * 50)
 
 
 def resolve_output(out_arg: str | None, out_name_arg: str | None,
@@ -322,6 +364,9 @@ def resolve_output(out_arg: str | None, out_name_arg: str | None,
 
 
 def main() -> None:
+    import time
+    t_script_start = time.perf_counter()   # capture as early as possible
+
     default_ref = str(config.CLONE_REFERENCE_AUDIO) if config.CLONE_REFERENCE_AUDIO else ""
 
     parser = argparse.ArgumentParser(
@@ -392,6 +437,7 @@ Examples:
         speed          = args.speed,
         seed           = args.seed,
         nfe_steps      = args.nfe_steps,
+        t_script_start = t_script_start,
     )
 
 

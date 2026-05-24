@@ -76,3 +76,41 @@ F5TTS_FINETUNE_WARMUP_STEPS = 10        # LR warmup steps (short for fine-tuning
 OUTPUT_DIR = PROJECT_ROOT / "output"
 
 CLONE_REFERENCE_AUDIO = str(OUTPUT_DIR / "recording.wav")  # set once, reuse forever
+
+# ── Batch voice cloning (used by batch_clone.py) ──────────────────────────────
+#
+# REFERENCE_AUDIOS  — voices to clone from
+#   Format:  "label": ("path/to/audio", "exact transcript of that audio")
+#   Tips:
+#     - Path can be relative to project root or absolute
+#     - Leave transcript as "" to auto-transcribe with Whisper (slower)
+#     - Label becomes part of the output filename
+#
+REFERENCE_AUDIOS: dict[str, tuple[str, str]] = {
+    # "ahmed":   ("data/references/ahmed_reference.wav", ""),
+    # "church":  ("Cross_Examination/Church world tour.wav",
+    #             "South Africa, Australia, New Zealand, Hawaii and Canada, "
+    #             "all in seven weeks following Agatha Christie on her world tour to promote the"),
+    # "ash":     ("Cross_Examination/Ash see shells.mp3",
+    #             "She sells sea shells by the sea shore."),
+}
+
+# TARGET_TEXTS — what each reference voice should say
+#   Format:  "label": "text to synthesise"
+#   Tips:
+#     - Label becomes part of the output filename
+#     - Sentences are auto-split for clean generation
+#
+TARGET_TEXTS: dict[str, str] = {
+    # "greeting":     "Hi, I am your personal AI assistant.",
+    # "bible_open":   "In the beginning God created the heaven and the earth. "
+    #                 "And the earth was without form, and void.",
+    # "intro":        "Welcome. My name is Ashy Washy and I am here to help you.",
+}
+
+# Optional: path to a fine-tuned checkpoint to use for all generations.
+# Leave as "" to use the pretrained base model.
+BATCH_CHECKPOINT: str = ""
+
+# Output folder — one sub-folder per reference label
+BATCH_OUTPUT_DIR = PROJECT_ROOT / "Output_results"
