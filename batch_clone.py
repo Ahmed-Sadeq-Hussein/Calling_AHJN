@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# CALLING AHJIN — Brought to you by Ahmed Hussein and Julius Norén from JTH.
 """
 batch_clone.py
 --------------
@@ -38,7 +39,10 @@ Usage:
 
 from __future__ import annotations
 import os, sys, argparse, time
+# KMP_DUPLICATE_LIB_OK: prevents fatal OMP #15 abort when PyTorch and numpy
+# both load their own OpenMP runtime on Windows (Intel MKL conflict).
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+# Suppress noisy HuggingFace symlinks warning on Windows.
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
 from pathlib import Path
@@ -56,7 +60,13 @@ except ImportError:
 # ── Helpers (shared with clone_voice.py) ──────────────────────────────────────
 
 def ensure_wav(audio_path: Path) -> Path:
-    """Convert any audio format to WAV if needed. Returns WAV path."""
+    """
+    Convert any audio file to 16-bit PCM WAV so F5-TTS can read it without FFmpeg.
+
+    Tries soundfile → torchaudio → PyAV in order; exits with an error message
+    if all backends fail. Converted files are cached in output/ to avoid
+    re-converting the same reference file for every target text.
+    """
     if audio_path.suffix.lower() == ".wav":
         return audio_path
 
@@ -107,7 +117,10 @@ def ensure_wav(audio_path: Path) -> Path:
 
 
 def split_sentences(text: str) -> list[str]:
-    """Split text at sentence boundaries for clean generation."""
+    """
+    Split text at . ! ? boundaries so each sentence is generated individually.
+    Long inputs degrade model coherence; splitting and stitching avoids this.
+    """
     import re
     parts = re.split(r'(?<=[.!?])\s+', text.strip())
     return [p.strip() for p in parts if p.strip()]
@@ -115,7 +128,10 @@ def split_sentences(text: str) -> list[str]:
 
 def trim_and_fade(wav: np.ndarray, sample_rate: int,
                   silence_db: float = -42.0, fade_ms: float = 60.0) -> np.ndarray:
-    """Remove trailing silence and apply a short fade-out."""
+    """
+    Remove trailing silence (below silence_db dBFS) and apply a linear fade-out.
+    Prevents the vocoder's hard cutoff from sounding like a clipped word.
+    """
     threshold = 10 ** (silence_db / 20)
     abs_wav = np.abs(wav)
     end_idx = len(wav)
@@ -134,10 +150,16 @@ def trim_and_fade(wav: np.ndarray, sample_rate: int,
 def generate_one(tts, ref_wav: str, ref_text: str, gen_text: str,
                  out_path: Path, nfe_steps: int, seed: int | None) -> tuple[float, float]:
     """
-    Generate one clip. Returns (inference_seconds, audio_duration_seconds).
-    Handles sentence splitting and stitching internally.
+    Synthesise one (reference, text) pair and write the result to out_path.
+
+    Internally handles sentence splitting and stitching with silence gaps so
+    multi-sentence texts are generated cleanly. The model is passed in as `tts`
+    so it can be reused across all clips without reloading.
+
+    Returns (inference_seconds, audio_duration_seconds).
     """
     sentences   = split_sentences(gen_text)
+    # 180 ms silence gap inserted between consecutive sentences after stitching
     silence_gap = 0.18
 
     t0 = time.perf_counter()
@@ -250,6 +272,9 @@ def main() -> None:
         return
 
     # ── Load model once ────────────────────────────────────────────────────────
+    # Loading F5-TTS takes 10–30 s. Loading once and reusing across all
+    # ref×text combinations is the main performance advantage of batch_clone.py
+    # over calling clone_voice.py once per clip.
     try:
         from f5_tts.api import F5TTS
     except ImportError:
@@ -275,10 +300,11 @@ def main() -> None:
             print(f"  ✗ Reference not found, skipping: {ref_path}")
             continue
 
-        # Convert to WAV once per reference
+        # Convert to WAV once per reference (result is cached in output/)
         ref_wav = str(ensure_wav(ref_path))
 
-        # Auto-transcribe once if transcript not provided
+        # Auto-transcribe once per reference if no transcript was supplied in config.
+        # Whisper base is used; delete the model after use to free VRAM.
         if not ref_text.strip():
             print(f"  Auto-transcribing {ref_label} …")
             try:

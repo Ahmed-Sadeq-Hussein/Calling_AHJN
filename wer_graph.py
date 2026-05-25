@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
+# CALLING AHJIN — Brought to you by Ahmed Hussein and Julius Norén from JTH.
 """
 wer_graph.py
 ------------
 Measures Word Error Rate (WER) for every audio file in the
 Cross_Examination folder and saves a bar graph there.
 
+Uses jiwer (Vaessen & van Leeuwen, 2021) for WER calculation:
+    pip install jiwer
+
 For each clip:
   1. Transcribe with faster-whisper (no FFmpeg needed for WAV)
-  2. Compare to the target text you provide
+  2. Compare to the target text using jiwer
   3. WER = (substitutions + deletions + insertions) / reference_word_count
 
 Output:
@@ -23,7 +27,10 @@ Usage:
 from __future__ import annotations
 
 import os
+# KMP_DUPLICATE_LIB_OK: prevents fatal OMP #15 abort from duplicate OpenMP runtimes.
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+# TorchDynamo's LLVM/SVML vectoriser crashes on some Windows + Anaconda setups.
+# Disabling it keeps Whisper running in eager mode with no quality impact.
 os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
 
 import sys
@@ -41,55 +48,62 @@ AUDIO_EXTS = {".wav", ".mp3", ".mp4", ".m4a", ".flac", ".ogg", ".opus", ".aac"}
 
 def compute_wer(reference: str, hypothesis: str) -> tuple[float, int, int, int, int]:
     """
-    Compute WER using dynamic programming (edit distance on word sequences).
+    Compute Word Error Rate using jiwer (Vaessen & van Leeuwen, 2021).
+    https://doi.org/10.5281/zenodo.5574948
 
-    Returns (wer, substitutions, deletions, insertions, ref_len).
-    WER = (S + D + I) / ref_len
+    WER = (substitutions + deletions + insertions) / reference_word_count
+
+    jiwer normalises both strings before alignment (lowercase, strip punctuation,
+    collapse whitespace) so minor casing and punctuation differences are not
+    penalised. We use the same transform on both reference and hypothesis to
+    keep the comparison fair.
+
+    Returns: (wer_float, substitutions, deletions, insertions, ref_word_count)
     """
-    ref   = reference.lower().split()
-    hyp   = hypothesis.lower().split()
-    n     = len(ref)
-    m     = len(hyp)
+    try:
+        import jiwer
+    except ImportError:
+        sys.exit("jiwer not installed. Run:  pip install jiwer")
 
-    # dp[i][j] = min edit ops to align ref[:i] with hyp[:j]
-    dp = [[0] * (m + 1) for _ in range(n + 1)]
-    for i in range(n + 1):
-        dp[i][0] = i
-    for j in range(m + 1):
-        dp[0][j] = j
+    # Standard normalisation pipeline applied to both reference and hypothesis
+    transform = jiwer.Compose([
+        jiwer.ToLowerCase(),
+        jiwer.RemovePunctuation(),
+        jiwer.RemoveMultipleSpaces(),
+        jiwer.Strip(),
+        jiwer.ReduceToListOfListOfWords(),
+    ])
 
-    for i in range(1, n + 1):
-        for j in range(1, m + 1):
-            if ref[i - 1] == hyp[j - 1]:
-                dp[i][j] = dp[i - 1][j - 1]
-            else:
-                dp[i][j] = 1 + min(
-                    dp[i - 1][j],       # deletion
-                    dp[i][j - 1],       # insertion
-                    dp[i - 1][j - 1],   # substitution
-                )
+    output = jiwer.process_words(
+        reference,
+        hypothesis,
+        reference_transform=transform,
+        hypothesis_transform=transform,
+    )
 
-    # Back-track to count S / D / I
-    i, j = n, m
-    subs = dels = ins = 0
-    while i > 0 or j > 0:
-        if i > 0 and j > 0 and ref[i-1] == hyp[j-1]:
-            i -= 1; j -= 1
-        elif i > 0 and j > 0 and dp[i][j] == dp[i-1][j-1] + 1:
-            subs += 1; i -= 1; j -= 1
-        elif j > 0 and dp[i][j] == dp[i][j-1] + 1:
-            ins += 1; j -= 1
-        else:
-            dels += 1; i -= 1
-
-    wer = (subs + dels + ins) / n if n > 0 else 0.0
-    return wer, subs, dels, ins, n
+    ref_len = len(reference.lower().split())
+    return (
+        output.wer,
+        output.substitutions,
+        output.deletions,
+        output.insertions,
+        ref_len,
+    )
 
 
 # ── Transcription ──────────────────────────────────────────────────────────────
 
 def transcribe(audio_path: Path, whisper_model_size: str) -> str:
-    """Transcribe an audio file with faster-whisper. No FFmpeg needed for WAV."""
+    """
+    Transcribe an audio file using faster-whisper.
+
+    Reads the file with soundfile first (fast, no FFmpeg needed for WAV), then
+    falls back to librosa for MP3/M4A/etc. Resamples to 16 kHz (Whisper's
+    required input rate) and runs beam-search decoding with VAD filtering.
+
+    The Whisper model is deleted after each clip to free VRAM before the
+    next transcription (important when evaluating many files in a loop).
+    """
     import numpy as np
     import soundfile as sf
     import librosa
@@ -98,22 +112,23 @@ def transcribe(audio_path: Path, whisper_model_size: str) -> str:
 
     print(f"  Transcribing {audio_path.name} …")
 
-    # Try soundfile first (fast, no dependencies)
+    # soundfile is fast and needs no FFmpeg for WAV/FLAC/OGG
     wav, sr = None, None
     try:
         wav, sr = sf.read(str(audio_path), dtype="float32", always_2d=False)
         if wav.ndim > 1:
-            wav = wav.mean(axis=1)
+            wav = wav.mean(axis=1)   # mix stereo to mono
     except Exception:
         pass
 
-    # Fall back to librosa (handles mp3, mp4, etc.)
+    # librosa fallback: handles MP3, MP4, M4A via audioread / Windows Media Foundation
     if wav is None:
         try:
             wav, sr = librosa.load(str(audio_path), sr=None, mono=True)
         except Exception as e:
             raise RuntimeError(f"Could not load {audio_path.name}: {e}")
 
+    # Whisper requires 16 kHz mono float32 input
     if sr != 16000:
         wav = librosa.resample(wav, orig_sr=sr, target_sr=16000)
 
@@ -123,7 +138,7 @@ def transcribe(audio_path: Path, whisper_model_size: str) -> str:
     model = WhisperModel(whisper_model_size, device=device, compute_type=compute)
     segments, _ = model.transcribe(wav, beam_size=5, language="en", vad_filter=True)
     text = " ".join(seg.text.strip() for seg in segments).strip()
-    del model  # free VRAM for next clip
+    del model   # explicitly free VRAM so the next clip does not OOM
 
     print(f"    -> \"{text}\"")
     return text
@@ -133,15 +148,25 @@ def transcribe(audio_path: Path, whisper_model_size: str) -> str:
 
 def save_bar_chart(labels: list[str], wers: list[float],
                    out_path: Path, target_text: str) -> None:
+    """
+    Render a colour-coded bar chart of WER scores and save it as a PNG.
+
+    Bars are coloured by quality tier:
+        green  (WER <= 15%) — good intelligibility
+        amber  (WER <= 30%) — fair but noticeable errors
+        red    (WER  > 30%) — poor, likely garbled or missing words
+
+    Uses matplotlib's non-interactive 'Agg' backend so no GUI window is opened.
+    """
     import matplotlib
-    matplotlib.use("Agg")
+    matplotlib.use("Agg")   # write to file; never open a GUI window
     import matplotlib.pyplot as plt
     import numpy as np
 
     n = len(labels)
     x = np.arange(n)
 
-    # Colour: green if WER <= 15%, amber if <= 30%, red above
+    # Assign bar colour based on WER quality tier
     colours = []
     for w in wers:
         if w <= 0.15:

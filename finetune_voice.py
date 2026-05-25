@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# CALLING AHJIN — Brought to you by Ahmed Hussein and Julius Norén from JTH.
 """
 finetune_voice.py
 -----------------
@@ -21,7 +22,10 @@ Usage:
 
 from __future__ import annotations
 import os, sys, shutil, subprocess, argparse, json
+# KMP_DUPLICATE_LIB_OK: avoids fatal OMP #15 abort from duplicate OpenMP runtimes
+# loaded by PyTorch (Intel MKL) and numpy on Windows.
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+# Suppress noisy HuggingFace symlinks warning on Windows.
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
 from pathlib import Path
@@ -30,29 +34,50 @@ from importlib.resources import files as pkg_files
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
 
-MODEL_NAME = "F5TTS_v1_Base"   # must match one of F5TTS_v1_Base / F5TTS_Base / E2TTS_Base
+# The F5-TTS CLI only accepts three hardcoded exp_name values:
+# F5TTS_v1_Base, F5TTS_Base, E2TTS_Base — any other name causes a KeyError.
+MODEL_NAME = "F5TTS_v1_Base"
 
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 
 def arrow_dir(speaker: str) -> Path:
-    """Where F5-TTS looks for the pre-built Arrow dataset."""
+    """
+    Return the path where F5-TTS expects the pre-built Apache Arrow dataset.
+
+    F5-TTS resolves data paths relative to the f5_tts package root using
+    importlib.resources. The ../../ prefix navigates up from the package
+    directory into the Anaconda Lib/ tree, e.g.:
+        .../anaconda3/Lib/site-packages/f5_tts/  →  .../anaconda3/Lib/data/<speaker>_custom/
+    """
     raw = str(pkg_files("f5_tts").joinpath(f"../../data/{speaker}_custom"))
     return Path(raw).resolve()
 
 def ckpt_dir_f5(speaker: str) -> Path:
-    """Where F5-TTS saves checkpoints internally (inside Anaconda)."""
+    """
+    Return the path where F5-TTS's finetune CLI saves checkpoints automatically.
+
+    Checkpoints land inside Anaconda's Lib/ directory (not the project folder).
+    copy_checkpoints_to_project() copies them to our project after training.
+    """
     raw = str(pkg_files("f5_tts").joinpath(f"../../ckpts/{speaker}"))
     return Path(raw).resolve()
 
 def out_dir(speaker: str) -> Path:
-    """Our project directory — final home for the saved checkpoint."""
+    """Return the project-local output directory for a speaker's checkpoints."""
     return config.MODELS_DIR / "f5tts_finetune" / speaker
 
 
 # ── Vocab ──────────────────────────────────────────────────────────────────────
 
 def find_vocab_path() -> str:
+    """
+    Locate the F5-TTS character vocabulary file (vocab.txt) from the pip install.
+
+    The finetune CLI tries to construct a path relative to a git checkout root,
+    which does not exist for pip installs. We point it to the file directly by
+    scanning all site-packages directories and then sys.path as a fallback.
+    """
     import site
     dirs = site.getsitepackages() if hasattr(site, "getsitepackages") else []
     try:
@@ -63,6 +88,7 @@ def find_vocab_path() -> str:
         v = Path(sp) / "f5_tts" / "infer" / "examples" / "vocab.txt"
         if v.exists():
             return str(v)
+    # Last-resort: walk sys.path entries (covers editable installs, conda envs)
     for entry in sys.path:
         v = Path(entry) / "f5_tts" / "infer" / "examples" / "vocab.txt"
         if v.exists():
@@ -74,8 +100,23 @@ def find_vocab_path() -> str:
 
 def build_arrow_dataset(manifest: Path, speaker: str) -> None:
     """
-    Converts <speaker>_filelist.txt  →  Arrow dataset at arrow_dir(speaker).
-    Skips if already built.
+    Convert a filelist manifest into an Apache Arrow dataset for F5-TTS training.
+
+    F5-TTS's finetune CLI reads audio-text pairs from an Arrow file rather than
+    individual WAVs, which dramatically speeds up data loading during training.
+    The function also computes clip durations and writes them to duration.json,
+    which F5-TTS uses for batch bucketing.
+
+    Input  (manifest format, pipe-separated):
+        /path/to/clip.wav|speaker_name|transcription
+        /path/to/clip.wav|transcription          (2-column variant)
+
+    Output:
+        <arrow_dir(speaker)>/raw.arrow       — Arrow columnar dataset
+        <arrow_dir(speaker)>/duration.json   — list of clip durations in seconds
+
+    Clips outside 0.3–30 s are silently skipped (too short or too long for F5-TTS).
+    Skips the build entirely if raw.arrow and duration.json already exist.
     """
     target = arrow_dir(speaker)
     arrow  = target / "raw.arrow"
@@ -139,7 +180,13 @@ def build_arrow_dataset(manifest: Path, speaker: str) -> None:
 # ── Find latest checkpoint ──────────────────────────────────────────────────────
 
 def find_latest_ckpt(speaker: str) -> str | None:
-    """Look in both the F5-TTS internal dir and our project dir."""
+    """
+    Return the path to the most recently modified checkpoint for a speaker.
+
+    Searches both the F5-TTS internal checkpoint directory (inside Anaconda)
+    and our project models/ directory, then returns the newest file by mtime.
+    Returns None if no checkpoints are found.
+    """
     search_dirs = [ckpt_dir_f5(speaker), out_dir(speaker)]
     ckpts = []
     for d in search_dirs:
@@ -181,10 +228,25 @@ def copy_checkpoints_to_project(speaker: str) -> None:
 
 def run_finetune(speaker: str, resume: bool, epochs: int, lr: float,
                  batch_size: int, save_every: int, warmup: int) -> None:
+    """
+    Invoke the F5-TTS finetune CLI as a subprocess for the given speaker.
 
+    The CLI is called either via the installed f5-tts_finetune-cli entry-point
+    (if available) or as a Python module (f5_tts.train.finetune_cli) as fallback.
+    After training (or Ctrl+C), checkpoints are copied from Anaconda's Lib/ckpts/
+    directory into our project's models/f5tts_finetune/<speaker>/ folder.
+
+    Key CLI flags:
+        --finetune           Start from pretrained weights rather than from scratch.
+        --tokenizer custom   Use our vocab.txt directly instead of building on-the-fly.
+        --batch_size_type sample  N clips per step (versus N mel-frames per step).
+        --last_per_updates   Must equal --save_per_updates to avoid a divide-by-zero
+                             in F5-TTS when the value is 0.
+    """
     vocab_path = find_vocab_path()
     print(f"Vocab      : {vocab_path}")
 
+    # Prefer the installed CLI entry-point; fall back to module invocation
     cli = shutil.which("f5-tts_finetune-cli")
     cli_args = [cli] if cli else [sys.executable, "-m", "f5_tts.train.finetune_cli"]
 
@@ -198,8 +260,8 @@ def run_finetune(speaker: str, resume: bool, epochs: int, lr: float,
         "--num_warmup_updates",   str(warmup),
         "--save_per_updates",     str(save_every),
         "--last_per_updates",     str(save_every), # same cadence — avoids divide-by-zero
-        "--keep_last_n_checkpoints", "2",          # keep only 2 checkpoints — prevents disk fill
-        "--finetune",
+        "--keep_last_n_checkpoints", "2",          # keep only 2 — prevents disk filling up
+        "--finetune",                               # start from pretrained F5-TTS weights
         "--tokenizer",            "custom",
         "--tokenizer_path",       vocab_path,
     ]

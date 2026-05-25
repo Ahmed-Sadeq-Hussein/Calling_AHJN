@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# CALLING AHJIN — Brought to you by Ahmed Hussein and Julius Norén from JTH.
 """
 compare_finetune.py
 -------------------
@@ -25,7 +26,9 @@ Usage:
 
 from __future__ import annotations
 import os, sys, subprocess, argparse, time
+# KMP_DUPLICATE_LIB_OK: avoids fatal OMP #15 abort from duplicate OpenMP runtimes.
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+# Suppress noisy HuggingFace symlinks warning on Windows.
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
 from pathlib import Path
@@ -35,20 +38,24 @@ import config
 
 
 # ── Dataset definitions ────────────────────────────────────────────────────────
+# Two contrasting datasets recorded from the same speaker (Ahmed Hussein):
+#   ahmed   — phonetically diverse short sentences, useful for articulation coverage
+#   Ahmed_2 — natural longer sentences, closer to conversational speech patterns
+# Training on both lets us compare how clip length and prosody affect clone quality.
 
 DATASETS = {
     "ahmed": {
         "speaker":  "ahmed",
         "manifest": config.PROCESSED_DATA_DIR / "ahmed_filelist.txt",
         "clips":    98,
-        "avg_dur":  4.6,
+        "avg_dur":  4.6,   # seconds per clip (used for time estimation)
         "desc":     "Short phonetic sentences (2–5s each)",
     },
     "Ahmed_2": {
         "speaker":  "Ahmed_2",
         "manifest": config.PROCESSED_DATA_DIR / "Ahmed_2_filelist.txt",
         "clips":    71,
-        "avg_dur":  7.1,
+        "avg_dur":  7.1,   # seconds per clip
         "desc":     "Longer natural sentences (7–9s each)",
     },
 }
@@ -57,9 +64,16 @@ DATASETS = {
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def estimate_time(clips: int, avg_dur: float, batch_size: int, epochs: int) -> str:
+    """
+    Rough wall-clock estimate for a training run on an RTX 3080.
+
+    Formula:  updates/epoch × seconds/update × epochs
+    seconds/update = 3.5 s base overhead + 0.4 s per second of audio in the batch.
+    Returns a human-readable string like '~2h 30min' or '~45min'.
+    """
     import math
     updates_per_epoch = math.ceil(clips / batch_size)
-    s_per_update      = 3.5 + avg_dur * 0.4
+    s_per_update      = 3.5 + avg_dur * 0.4   # empirically measured on RTX 3080
     total_minutes     = updates_per_epoch * s_per_update * epochs / 60
     h = int(total_minutes // 60)
     m = int(total_minutes % 60)
@@ -69,8 +83,10 @@ def estimate_time(clips: int, avg_dur: float, batch_size: int, epochs: int) -> s
 def run_finetune(speaker: str, manifest: Path, epochs: int, batch_size: int,
                  save_every: int, warmup: int, resume: bool) -> tuple[bool, float]:
     """
-    Run finetune_voice.py for one speaker.
-    Returns (success, elapsed_seconds).
+    Launch finetune_voice.py as a subprocess for one dataset.
+
+    Delegates all training logic to finetune_voice.py rather than duplicating it.
+    Returns (success: bool, elapsed_seconds: float).
     """
     script = Path(__file__).resolve().parent / "finetune_voice.py"
 

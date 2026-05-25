@@ -1,27 +1,36 @@
+# CALLING AHJIN — Brought to you by Ahmed Hussein and Julius Norén from JTH.
+
 from pathlib import Path
 
 # ── Project root (everything is relative to this file) ────────────────────────
+# __file__ resolves to config.py; using .resolve().parent gives the absolute
+# directory regardless of where Python is launched from.
 PROJECT_ROOT = Path(__file__).resolve().parent
 
 # ── Resemblyzer settings (do not modify) ──────────────────────────────────────
-# Here you insert your Path to the folder of the training voice
+# Resemblyzer produces 256-d d-vector embeddings from raw audio.
+# These are compared with cosine similarity (0 = unrelated, 1 = same speaker).
+
+# Path to the folder containing the training-speaker's WAV files.
 training_voice = ""
-# Here you insert your Path to the folder of the target voices.
+# List of paths to folders containing target speakers' WAV files for comparison.
 target_voices = []
-# Here we write the name of the folder where the run experiment is meant to be made inside.
+# Name of the experiment sub-folder — used to organise outputs per run.
 experiment_name = "Experiment_1"
-# Here we insert metadata into the recording in order to identify the voice.
+# Metadata tag embedded in the training-voice recording to track provenance.
 training_voice_metadata = "Training_Voice" + experiment_name
 
-# Resemblyzer global variables
+# Folder scanned by resembler metric.py, wer_graph.py and blind_test.py.
 cross_examination_folder = "Cross_Examination"
-Resemble_threshold = 0.75  # Cosine score at/above which speakers are judged the same.
+# Cosine similarity threshold: pairs scoring at or above this are flagged
+# as "same speaker" in the heatmap output of resembler metric.py.
+Resemble_threshold = 0.75
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 MODELS_DIR           = PROJECT_ROOT / "models"
 DATA_DIR             = PROJECT_ROOT / "data"
-MLS_CACHE_DIR        = DATA_DIR / "mls_cache"      # HuggingFace streaming cache
-PROCESSED_DATA_DIR   = DATA_DIR / "processed"      # downloaded + preprocessed wav files
+MLS_CACHE_DIR        = DATA_DIR / "mls_cache"      # HuggingFace streaming cache for MLS downloads
+PROCESSED_DATA_DIR   = DATA_DIR / "processed"      # filelist .txt files produced by record_dataset.py
 
 # ── MLS (Multilingual LibriSpeech) / LibriTTS dataset settings ────────────────
 # ISO codes: EN=LibriTTS, DE=german, FR=french, NL=dutch,
@@ -37,10 +46,10 @@ MLS_MAX_DURATION_SEC = 20.0
 
 # ── Audio settings ─────────────────────────────────────────────────────────────
 # Used by download_mls.py and prepare_voice.py to write WAV files.
-SAMPLE_RATE = 22050   # download/clip storage rate
+SAMPLE_RATE = 22050   # storage sample rate for downloaded clips
 
-# F5-TTS native sample rate — the model resamples internally, but convert_manifest.py
-# can optionally write 24 kHz copies when --resample is passed.
+# F5-TTS natively operates at 24 kHz.  The model resamples internally during
+# inference, but convert_manifest.py can write 24 kHz copies via --resample.
 F5TTS_SAMPLE_RATE = 24000
 
 # ── Speaker embedding settings ─────────────────────────────────────────────────
@@ -59,15 +68,15 @@ F5TTS_FINETUNE_DIR = MODELS_DIR / "f5tts_finetune"
 F5TTS_CKPT_PATH = ""
 
 # ── F5-TTS fine-tuning hyperparameters ────────────────────────────────────────
-# These are used by finetune_voice.py.
+# These defaults are used by finetune_voice.py when no CLI flags are given.
 # With ~30 min of voice recording on an RTX 3080:
 #   - 10 epochs ≈ 10-20 min training  → good quality
 #   - 20 epochs ≈ 20-40 min training  → very good quality (risk of overfitting)
 F5TTS_FINETUNE_EPOCHS      = 10
-F5TTS_FINETUNE_LR          = 1e-5       # learning rate (lower than pretraining)
-F5TTS_FINETUNE_BATCH_SIZE  = 8          # batch size per GPU; reduce to 4 on OOM
+F5TTS_FINETUNE_LR          = 1e-5       # lower than pretraining to avoid catastrophic forgetting
+F5TTS_FINETUNE_BATCH_SIZE  = 8          # clips per GPU step; reduce to 4 if OOM
 F5TTS_FINETUNE_SAVE_EVERY  = 300        # save checkpoint every N gradient updates
-F5TTS_FINETUNE_WARMUP_STEPS = 10        # LR warmup steps (short for fine-tuning)
+F5TTS_FINETUNE_WARMUP_STEPS = 10        # short warmup appropriate for fine-tuning (not scratch)
 
 # ── Inference / voice cloning ──────────────────────────────────────────────────
 # Path to a reference audio clip for zero-shot cloning (5–30 seconds ideal).

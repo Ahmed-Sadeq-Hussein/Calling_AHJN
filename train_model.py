@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# CALLING AHJIN — Brought to you by Ahmed Hussein and Julius Norén from JTH.
 """
 train_model.py
 --------------
@@ -30,32 +31,42 @@ from __future__ import annotations
 import os, sys, shutil, subprocess, argparse
 from pathlib import Path
 
+# KMP_DUPLICATE_LIB_OK: prevents fatal OMP #15 abort from duplicate OpenMP runtimes.
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+# Suppress noisy HuggingFace symlinks warning on Windows.
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")  # reduces fragmentation OOM
+# expandable_segments lets PyTorch reclaim fragmented VRAM between batches,
+# reducing OOM errors on GPUs with 10 GB or less during long training runs.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
 
 
-MODEL_NAME   = "F5TTS_v1_Base"   # must be one of F5TTS_v1_Base / F5TTS_Base / E2TTS_Base
-DATASET_NAME = "librispeech"     # free-form name; F5-TTS looks for data/librispeech/
+# F5-TTS CLI only accepts three hardcoded exp_name values; always use this one.
+MODEL_NAME   = "F5TTS_v1_Base"
+# Free-form dataset name; F5-TTS will look for data/librispeech/ at runtime.
+DATASET_NAME = "librispeech"
+# Paths to the CSV manifests produced by convert_manifest.py.
 TRAIN_CSV    = config.PROCESSED_DATA_DIR / "metadata.csv"
 VAL_CSV      = config.PROCESSED_DATA_DIR / "metadata_val.csv"
-# F5-TTS saves checkpoints to ckpts/<MODEL_NAME>/ by default
+# Project-local directory where checkpoints are copied after training.
 OUT_DIR      = config.MODELS_DIR / "f5tts_librispeech"
 
 # ── Manual vocab override ──────────────────────────────────────────────────────
-# If find_vocab_path() fails, set this to the absolute path of vocab.txt, e.g.:
+# Set this if find_vocab_path() fails on your system, e.g.:
 #   VOCAB_PATH_OVERRIDE = r"C:\Users\music\anaconda3\Lib\site-packages\f5_tts\infer\examples\vocab.txt"
 VOCAB_PATH_OVERRIDE: str | None = None
 
 
 def setup_dataset_dir() -> Path:
     """
-    F5-TTS finetune CLI looks for data in  data/<dataset_name>/metadata.csv
-    relative to the current working directory.
-    We create that folder and copy our metadata CSVs there.
+    Create the dataset directory that F5-TTS's finetune CLI expects.
+
+    The CLI looks for data/<dataset_name>/metadata.csv relative to the CWD.
+    We create that directory and copy our pre-built metadata CSVs into it,
+    renaming the validation file to metadata_eval.csv as F5-TTS expects.
+    Returns the path to the created dataset directory.
     """
     import shutil
     dataset_dir = config.DATA_DIR / DATASET_NAME
@@ -75,13 +86,29 @@ def setup_dataset_dir() -> Path:
 
 
 def get_arrow_dir() -> Path:
-    """Compute the path where F5-TTS expects the pre-built Arrow dataset."""
+    """
+    Return the path where F5-TTS expects the pre-built Arrow dataset.
+
+    F5-TTS resolves dataset paths relative to its package root using
+    importlib.resources, producing a path like:
+        <anaconda>/Lib/site-packages/../data/librispeech_custom/
+    prepare_dataset.py must be run before training to populate this directory.
+    """
     from importlib.resources import files as pkg_files
     raw = str(pkg_files("f5_tts").joinpath(f"../../data/{DATASET_NAME}_custom"))
     return Path(raw).resolve()
 
 
 def check_prerequisites() -> None:
+    """
+    Verify that all files required before training exist and are non-empty.
+
+    Checks for:
+      - metadata.csv and metadata_val.csv (produced by convert_manifest.py)
+      - The pre-built Arrow dataset (produced by prepare_dataset.py)
+
+    Exits with a helpful error message if any prerequisite is missing.
+    """
     missing = []
     if not TRAIN_CSV.exists():
         missing.append(f"  {TRAIN_CSV}  (run: python convert_manifest.py)")
@@ -193,9 +220,23 @@ def find_vocab_path() -> str:
 
 def run_training(resume: bool, epochs: int, lr: float,
                  batch_size: int, save_every: int) -> None:
+    """
+    Set up the dataset directory and launch the F5-TTS finetune CLI for LibriTTS.
 
+    Uses --finetune to start from the pretrained F5-TTS checkpoint rather than
+    from randomly initialised weights. This is "continued pre-training": the model
+    already produces intelligible speech from day 1, and we improve it further on
+    downloaded LibriTTS data.
+
+    Key CLI flags:
+        --finetune           Start from pretrained weights (not from scratch).
+        --batch_size_type sample  N clips per step (not N mel-frames).
+        --keep_last_n_checkpoints 2  Prevents disk exhaustion during long runs.
+        --last_per_updates   Set equal to --save_per_updates to avoid divide-by-zero.
+    """
     setup_dataset_dir()
 
+    # Prefer the installed CLI entry-point; fall back to module invocation
     cli = shutil.which("f5-tts_finetune-cli")
     if cli is None:
         cli_args = [sys.executable, "-m", "f5_tts.train.finetune_cli"]
@@ -214,16 +255,16 @@ def run_training(resume: bool, epochs: int, lr: float,
         "--dataset_name",         DATASET_NAME,
         "--learning_rate",        str(lr),
         "--batch_size_per_gpu",   str(batch_size),
-        "--batch_size_type",      "sample",   # 'sample' = N clips/step; 'frame' = N mel frames/step
+        "--batch_size_type",      "sample",   # 'sample' = N clips/step; 'frame' = N mel-frames/step
         "--epochs",               str(epochs),
-        "--num_warmup_updates",   "500",
+        "--num_warmup_updates",   "500",       # 500 warmup steps is appropriate for large-scale continued pre-training
         "--save_per_updates",          str(save_every),
-        "--last_per_updates",          str(save_every),  # same cadence — 0 causes divide-by-zero
-        "--keep_last_n_checkpoints",   "2",              # only keep 2 — prevents disk filling
-        "--finetune",                                     # start from pretrained checkpoint
-        "--tokenizer",            "custom",    # use vocab.txt directly
+        "--last_per_updates",          str(save_every),  # must equal save_per_updates to avoid divide-by-zero
+        "--keep_last_n_checkpoints",   "2",              # discard older checkpoints to prevent disk exhaustion
+        "--finetune",                                     # initialise from pretrained F5-TTS base model
+        "--tokenizer",            "custom",               # point directly at vocab.txt rather than building it
         "--tokenizer_path",       vocab_path,
-        # --logger omitted → defaults to None (no logging)
+        # --logger intentionally omitted → defaults to None (no W&B / TensorBoard logging)
     ]
 
     # Resume from a specific checkpoint

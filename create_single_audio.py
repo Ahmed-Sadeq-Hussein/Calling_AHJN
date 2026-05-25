@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# CALLING AHJIN — Brought to you by Ahmed Hussein and Julius Norén from JTH.
 """
 create_single_audio.py
 ----------------------
@@ -18,6 +19,8 @@ Usage:
 
 from __future__ import annotations
 import os, sys, argparse, threading, time
+# KMP_DUPLICATE_LIB_OK: prevents fatal OMP #15 abort on Windows when both
+# PyTorch (Intel MKL) and numpy each load their own OpenMP runtime.
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 from pathlib import Path
@@ -32,12 +35,16 @@ try:
 except ImportError:
     sys.exit("Run:  pip install sounddevice soundfile numpy")
 
-SAMPLE_RATE    = config.F5TTS_SAMPLE_RATE   # 24 kHz — F5-TTS native
+# Record at 24 kHz — F5-TTS's native sample rate. Recording at this rate avoids
+# any resampling artefacts when the clip is used as a reference audio.
+SAMPLE_RATE    = config.F5TTS_SAMPLE_RATE
 REFERENCES_DIR = config.DATA_DIR / "references"
 
 # ── Built-in default script ────────────────────────────────────────────────────
 # Phonetically rich, ~25 seconds at natural pace.
-# Covers all English vowels, consonant clusters, varied rhythm and prosody.
+# Deliberately covers all English vowels, common consonant clusters, varied
+# sentence rhythm, and pitch contours — giving F5-TTS a good spread of
+# phoneme representations to clone from.
 DEFAULT_SCRIPT = """\
 The thing about mornings is they never wait for you.
 Years of rushing out half-awake taught me that.
@@ -55,7 +62,13 @@ And just for a moment, everything feels exactly right.\
 
 def choose_script() -> str:
     """
-    Interactive menu: let the user pick or type the script before recording.
+    Present an interactive menu so the user can choose what to read.
+
+    Options:
+      1. Built-in phonetically rich default script (recommended for best cloning).
+      2. Type / paste a custom script in the terminal.
+      3. Load text from a .txt file (lines starting with # are treated as comments).
+
     Returns the final script text as a single string.
     """
     print()
@@ -127,12 +140,22 @@ def choose_script() -> str:
 # ── Recording ──────────────────────────────────────────────────────────────────
 
 def record_clip(sample_rate: int, device: int | None) -> np.ndarray | None:
-    """Record until the user presses Enter. Returns float32 mono array."""
+    """
+    Open the microphone and record until the user presses Enter.
+
+    Uses a sounddevice InputStream with a callback that appends each audio
+    block to a list. A background thread prints an elapsed-time counter so
+    the user knows recording is active. Recording stops cleanly whether the
+    user presses Enter or Ctrl+C interrupts the input() call.
+
+    Returns a float32 mono numpy array, or None if no audio was captured.
+    """
     frames: list[np.ndarray] = []
     recording = threading.Event()
     recording.set()
 
     def callback(indata, frame_count, time_info, status):
+        # sounddevice calls this on a high-priority audio thread — only append, no I/O
         if recording.is_set():
             frames.append(indata.copy())
 
@@ -144,6 +167,7 @@ def record_clip(sample_rate: int, device: int | None) -> np.ndarray | None:
     stop_display = threading.Event()
 
     def show_elapsed():
+        """Background thread: prints elapsed recording time every 100 ms."""
         start = time.time()
         while not stop_display.is_set():
             elapsed = time.time() - start
@@ -155,8 +179,9 @@ def record_clip(sample_rate: int, device: int | None) -> np.ndarray | None:
     try:
         stream.start()
         display_thread.start()
-        input()
+        input()   # block until user presses Enter
     finally:
+        # Stop recording and the display thread regardless of how we exited
         recording.clear()
         stop_display.set()
         stream.stop()
@@ -166,23 +191,31 @@ def record_clip(sample_rate: int, device: int | None) -> np.ndarray | None:
     print()
     if not frames:
         return None
+    # Concatenate all captured blocks into a single 1-D mono array
     return np.concatenate(frames, axis=0).squeeze()
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    """
+    Entry point: parse CLI args, validate the microphone, and run the record loop.
+
+    The record loop allows multiple takes; the user can redo a take if they
+    are not happy with the result. Saves to data/references/<name>.wav at
+    F5TTS_SAMPLE_RATE (24 kHz) in 16-bit PCM format.
+    """
     parser = argparse.ArgumentParser(
         description="Record a single reference audio clip for voice cloning")
     parser.add_argument(
         "--name", required=True,
-        help="Output filename (no extension), e.g. ahmed_reference  →  data/references/ahmed_reference.wav")
+        help="Output filename stem, e.g. ahmed_reference  →  data/references/ahmed_reference.wav")
     parser.add_argument(
         "--device", type=int, default=None,
-        help="Microphone device index (run --list-devices to see options)")
+        help="Microphone device index (use --list-devices to see options)")
     parser.add_argument(
         "--list-devices", action="store_true",
-        help="List available microphone devices and exit")
+        help="Print all available input devices and exit")
     args = parser.parse_args()
 
     if args.list_devices:
@@ -194,7 +227,7 @@ def main() -> None:
         print()
         sys.exit(0)
 
-    # Mic sanity check
+    # Verify the chosen (or default) mic supports our target settings before recording
     try:
         sd.check_input_settings(device=args.device, channels=1,
                                 dtype="float32", samplerate=SAMPLE_RATE)
@@ -273,9 +306,11 @@ def main() -> None:
         print()
 
         if duration < 10:
+            # Clips under 10 s often lack enough phonetic variety for good cloning
             print("  ⚠  Under 10 seconds — a longer clip gives better cloning quality.")
             print()
         elif duration > 35:
+            # F5-TTS truncates references to 12 s internally; extra audio is ignored
             print("  ⚠  Over 35 seconds — F5-TTS clips references to 12s internally.")
             print("      Consider reading only the first half of the script.")
             print()

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# CALLING AHJIN — Brought to you by Ahmed Hussein and Julius Norén from JTH.
 """
 clone_voice.py
 --------------
@@ -28,9 +29,15 @@ Usage:
 
 from __future__ import annotations
 import os
+# KMP_DUPLICATE_LIB_OK: PyTorch (Intel MKL) and numpy/numba each ship their own
+# OpenMP runtime. On Windows they collide on first import, causing a fatal OMP #15
+# abort. Allowing the duplicate is the standard inference-time workaround.
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+# Suppress noisy HuggingFace symlinks warning on Windows (symlinks need admin rights).
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
-os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")   # prevents LLVM SVML crash on Windows
+# TorchDynamo's LLVM/SVML vectoriser crashes on some Windows + Anaconda combos.
+# Disabling it falls back to eager mode — no quality loss for inference.
+os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
 
 import sys, argparse
 from pathlib import Path
@@ -57,10 +64,13 @@ import config
 
 def ensure_wav(audio_path: Path) -> Path:
     """
-    F5-TTS uses pydub internally which needs FFmpeg for non-WAV formats.
-    We bypass that by converting to WAV ourselves using installed backends.
-    Returns the original path unchanged if it is already a WAV.
-    Converted files are cached in output/ so the conversion only runs once.
+    Convert any audio file to 16-bit PCM WAV so F5-TTS can read it without FFmpeg.
+
+    F5-TTS calls pydub internally, which requires a system FFmpeg for MP3/M4A etc.
+    We avoid that dependency by trying four pure-Python audio backends in order.
+    Converted files are cached in output/ so repeated calls are instant.
+
+    Returns the original path unchanged if it is already a WAV file.
     """
     if audio_path.suffix.lower() == ".wav":
         return audio_path
@@ -76,7 +86,8 @@ def ensure_wav(audio_path: Path) -> Path:
 
     wav, sr = None, None
 
-    # 1. soundfile — handles WAV/FLAC/OGG; newer libsndfile also reads MP3
+    # Backend 1: soundfile — fast, zero overhead; handles WAV/FLAC/OGG natively.
+    # Newer libsndfile (≥1.1.0) also reads MP3.
     if wav is None:
         try:
             import soundfile as sf
@@ -84,7 +95,8 @@ def ensure_wav(audio_path: Path) -> Path:
         except Exception:
             pass
 
-    # 2. librosa — uses audioread which on Windows tries Media Foundation
+    # Backend 2: librosa — uses audioread which falls back to Windows Media Foundation
+    # for MP3/M4A when FFmpeg is absent.
     if wav is None:
         try:
             import librosa
@@ -92,17 +104,18 @@ def ensure_wav(audio_path: Path) -> Path:
         except Exception:
             pass
 
-    # 3. torchaudio — bundled codec support for common formats
+    # Backend 3: torchaudio — ships bundled codec support via ffmpeg/sox backends.
     if wav is None:
         try:
             import torch, torchaudio
             waveform, sr = torchaudio.load(str(audio_path))
             import numpy as np
-            wav = waveform.mean(0).numpy()   # stereo → mono
+            wav = waveform.mean(0).numpy()   # mix stereo channels to mono
         except Exception:
             pass
 
-    # 4. PyAV (av package, ships its own FFmpeg DLLs — installed via faster-whisper)
+    # Backend 4: PyAV — the av package (installed with faster-whisper) bundles its
+    # own FFmpeg DLLs, so this works even without a system FFmpeg installation.
     if wav is None:
         try:
             import av, numpy as np
@@ -110,7 +123,7 @@ def ensure_wav(audio_path: Path) -> Path:
             stream = next(s for s in container.streams if s.type == "audio")
             frames = [f.to_ndarray() for f in container.decode(stream)]
             wav = np.concatenate(frames, axis=-1).mean(axis=0).astype("float32")
-            wav /= max(abs(wav).max(), 1e-6)   # normalise to [-1, 1]
+            wav /= max(abs(wav).max(), 1e-6)   # normalise amplitude to [-1, 1]
             sr  = stream.codec_context.sample_rate
         except Exception:
             pass
@@ -133,8 +146,13 @@ def ensure_wav(audio_path: Path) -> Path:
 
 def auto_transcribe(audio_path: Path) -> str:
     """
-    Transcribe reference audio using faster-whisper.
-    No FFmpeg needed — reads WAV directly with soundfile.
+    Transcribe a WAV reference clip with faster-whisper (Whisper base model).
+
+    Reads the audio with soundfile (no FFmpeg needed for WAV), resamples to
+    16 kHz (Whisper's required input rate), and runs beam-search with VAD
+    filtering to skip silence segments.
+
+    Returns the raw transcript string for use as ref_text in F5-TTS inference.
     """
     import torch
     import numpy as np
@@ -149,8 +167,9 @@ def auto_transcribe(audio_path: Path) -> str:
     print("Auto-transcribing reference audio...")
     wav, sr = sf.read(str(audio_path), dtype="float32", always_2d=False)
     if wav.ndim > 1:
-        wav = wav.mean(axis=1)
+        wav = wav.mean(axis=1)   # mix to mono before resampling
     if sr != 16000:
+        # Whisper was trained at 16 kHz; resample if the WAV was recorded at a different rate
         wav = librosa.resample(wav, orig_sr=sr, target_sr=16000)
 
     device  = "cuda" if torch.cuda.is_available() else "cpu"
@@ -168,23 +187,31 @@ def trim_and_fade(wav: "np.ndarray", sample_rate: int,
                   silence_db: float = -42.0,
                   fade_ms: float = 60.0) -> "np.ndarray":
     """
-    Remove trailing silence then apply a short fade-out.
-    Prevents the vocoder's hard boundary cut from sounding like a word being clipped.
+    Remove trailing silence and apply a short cosine fade-out.
+
+    F5-TTS sometimes leaves an abrupt hard boundary at the end of a generated
+    clip, which sounds like a word being cut mid-syllable. This function:
+      1. Scans backward to find the last voiced sample (above silence_db dBFS).
+      2. Keeps an 80 ms natural decay tail after that sample.
+      3. Applies a linear fade-out over the final fade_ms milliseconds.
+
+    silence_db: amplitude threshold in dBFS; default -42 dB ≈ near-silence.
+    fade_ms   : length of the fade-out window in milliseconds.
     """
     import numpy as np
     threshold = 10 ** (silence_db / 20)
     abs_wav = np.abs(wav)
-    # Walk backwards to find last frame above the silence threshold
+    # Walk backwards from the end to find the last sample above silence threshold
     end_idx = len(wav)
     for i in range(len(wav) - 1, -1, -1):
         if abs_wav[i] > threshold:
             end_idx = i + 1
             break
-    # Keep a small natural tail after last voiced sample, then fade
-    tail_samples = int(0.08 * sample_rate)   # 80 ms natural decay
+    # Retain 80 ms of natural ring-off after the last voiced sample
+    tail_samples = int(0.08 * sample_rate)
     end_idx = min(end_idx + tail_samples, len(wav))
     wav = wav[:end_idx].copy()
-    # Fade-out over the last fade_ms milliseconds
+    # Linear fade-out over the last fade_ms milliseconds
     fade_samples = min(int(fade_ms / 1000 * sample_rate), len(wav))
     wav[-fade_samples:] *= np.linspace(1.0, 0.0, fade_samples)
     return wav
@@ -193,12 +220,16 @@ def trim_and_fade(wav: "np.ndarray", sample_rate: int,
 def split_sentences(text: str) -> list[str]:
     """
     Split text into individual sentences at . ! ? boundaries.
-    Each sentence stays within the model's comfortable generation range (~3–6 s).
+
+    F5-TTS degrades on very long inputs (>100 tokens).  Splitting at sentence
+    boundaries keeps each inference call within the model's comfortable range
+    (~3–6 seconds of speech), then infer() stitches the pieces back together
+    with a short silence gap between sentences.
     """
     import re
-    # Split after . ! ? followed by whitespace or end-of-string
+    # Lookbehind: split after a sentence-ending punctuation mark followed by whitespace
     parts = re.split(r'(?<=[.!?])\s+', text.strip())
-    # Drop empty parts, keep punctuation attached to each sentence
+    # Drop empty segments; punctuation stays attached to its sentence
     return [p.strip() for p in parts if p.strip()]
 
 
@@ -251,9 +282,10 @@ def infer(reference_path: Path, ref_text: str, gen_text: str,
     print()
 
     # ── Sentence-by-sentence generation ──────────────────────────────────────
-    # Fine-tuned models trained on short clips (2–5 s) lose coherence on long
-    # sequences. Splitting into individual sentences keeps each inference call
-    # within the model's comfortable range, then we stitch the pieces together.
+    # Fine-tuned models trained on short clips (2–5 s) can produce muffled or
+    # repetitive audio on long inputs. Splitting at sentence boundaries keeps
+    # each call within the model's training distribution, then we concatenate
+    # the individual WAVs with a short silence gap.
     sentences = split_sentences(gen_text)
 
     t_infer_start = time.perf_counter()
@@ -299,7 +331,8 @@ def infer(reference_path: Path, ref_text: str, gen_text: str,
             waves.append(wav_i)
             sample_rate = sr_i
 
-        # Add short silence gap between sentences, then concatenate
+        # Insert a 180 ms silence gap between sentences to mimic natural speech
+        # pausing, then concatenate all pieces into a single waveform.
         gap = np.zeros(int(silence_gap * sample_rate), dtype=np.float32)
         stitched = []
         for i, w in enumerate(waves):
@@ -363,6 +396,57 @@ def resolve_output(out_arg: str | None, out_name_arg: str | None,
     return next_free_path(base)
 
 
+def load_config_json(name: str) -> dict:
+    """
+    Load a JSON config file from the Voice_configuration/ folder.
+
+    'name' can be:
+      - a bare stem:        "ahmed_test"
+      - with extension:     "ahmed_test.json"
+      - a full/relative path: "some/other/folder/ahmed_test.json"
+
+    Supported JSON keys (all optional except 'text'):
+        reference   – path to reference WAV/MP3
+        ref_text    – transcript of the reference clip
+        text        – text to synthesise  (required)
+        checkpoint  – path to fine-tuned .pt checkpoint
+        out_name    – output filename stem  (saves to output/<out_name>.wav)
+        out         – full output path override
+        speed       – float, default 1.0
+        seed        – int,   default -1
+        nfe_steps   – int,   default 32
+    """
+    import json
+
+    p = Path(name)
+
+    # If it looks like an existing path already, use it directly
+    if p.suffix.lower() == ".json" and p.exists():
+        cfg_path = p
+    else:
+        # Strip .json if user accidentally typed it, then look in Voice_configuration/
+        stem = p.stem if p.suffix.lower() == ".json" else p.name
+        cfg_dir = Path(config.__file__).resolve().parent / "Voice_configuration"
+        cfg_path = cfg_dir / f"{stem}.json"
+
+    if not cfg_path.exists():
+        # List available configs to help the user
+        cfg_dir = Path(config.__file__).resolve().parent / "Voice_configuration"
+        available = sorted(cfg_dir.glob("*.json")) if cfg_dir.is_dir() else []
+        names = "\n  ".join(p.stem for p in available) if available else "(none found)"
+        sys.exit(
+            f"Config file not found: {cfg_path}\n\n"
+            f"Available configs in Voice_configuration/:\n  {names}\n\n"
+            f"Usage:  python clone_voice.py --config <name>"
+        )
+
+    with open(cfg_path, encoding="utf-8") as f:
+        data = json.load(f)
+
+    print(f"Config loaded: {cfg_path.name}")
+    return data
+
+
 def main() -> None:
     import time
     t_script_start = time.perf_counter()   # capture as early as possible
@@ -374,6 +458,10 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Load everything from a JSON config file:
+  python clone_voice.py --config ahmed_crossexamination
+  # → reads Voice_configuration/ahmed_crossexamination.json
+
   # Use your default reference (set in config.py):
   python clone_voice.py --text "Hello world."
 
@@ -385,17 +473,23 @@ Examples:
   python clone_voice.py --reference voices/john.wav --ref-text "What John said." \\
                         --text "Hello." --out-name john_greeting
   # → output/john_greeting.wav
+
+  # CLI flags always override values from --config:
+  python clone_voice.py --config ahmed_crossexamination --nfe-steps 16
 """)
 
     parser.add_argument(
-        "--reference", default=default_ref, required=not bool(default_ref),
-        help="Reference audio clip of the voice to clone (5-30 s, WAV/FLAC/MP3). "
-             "Default: CLONE_REFERENCE_AUDIO from config.py")
+        "--config", default=None, metavar="NAME",
+        help="Name of a JSON file in Voice_configuration/ (no .json needed). "
+             "All other flags are optional when using --config; CLI flags override JSON values.")
     parser.add_argument(
-        "--ref-text", default="",
+        "--reference", default=None,
+        help="Reference audio clip of the voice to clone (5-30 s, WAV/FLAC/MP3).")
+    parser.add_argument(
+        "--ref-text", default=None,
         help="Transcript of the reference clip. If omitted, Whisper auto-transcribes.")
     parser.add_argument(
-        "--text", required=True,
+        "--text", default=None,
         help="Text to synthesise in the cloned voice")
     parser.add_argument(
         "--out-name", default=None, metavar="NAME",
@@ -408,35 +502,67 @@ Examples:
         "--checkpoint", default=None,
         help="Path to a fine-tuned F5-TTS checkpoint .pt file (optional)")
     parser.add_argument(
-        "--speed", type=float, default=1.0,
+        "--speed", type=float, default=None,
         help="Speech speed multiplier, e.g. 0.9 for slightly slower (default 1.0)")
     parser.add_argument(
-        "--seed", type=int, default=-1,
+        "--seed", type=int, default=None,
         help="RNG seed for reproducibility (-1 = random, default -1)")
     parser.add_argument(
-        "--nfe-steps", type=int, default=32,
+        "--nfe-steps", type=int, default=None,
         help="Diffusion NFE steps: 16 (fast) to 32 (quality). Default 32.")
     args = parser.parse_args()
 
-    reference_path = Path(args.reference)
+    # ── Merge JSON config + CLI (CLI always wins) ──────────────────────────────
+    cfg: dict = {}
+    if args.config:
+        cfg = load_config_json(args.config)
+
+    # Resolve each value: CLI arg → JSON value → built-in default
+    reference  = args.reference  or cfg.get("reference",  default_ref)
+    ref_text   = args.ref_text   if args.ref_text is not None else cfg.get("ref_text",  "")
+    gen_text   = args.text       or cfg.get("text",        None)
+    out_name   = args.out_name   or cfg.get("out_name",    None)
+    out        = args.out        or cfg.get("out",         None)
+    checkpoint = args.checkpoint or cfg.get("checkpoint",  None)
+    speed      = args.speed      if args.speed      is not None else float(cfg.get("speed",     1.0))
+    seed       = args.seed       if args.seed       is not None else int(cfg.get("seed",       -1))
+    nfe_steps  = args.nfe_steps  if args.nfe_steps  is not None else int(cfg.get("nfe_steps",  32))
+
+    # ── Validate ───────────────────────────────────────────────────────────────
+    if not reference:
+        sys.exit("No reference audio specified.\n"
+                 "Use --reference, set CLONE_REFERENCE_AUDIO in config.py, "
+                 "or add 'reference' to your JSON config.")
+
+    if not gen_text:
+        sys.exit("No text to synthesise.\n"
+                 "Use --text or add 'text' to your JSON config.")
+
+    reference_path = Path(reference)
+    if not reference_path.is_absolute():
+        reference_path = Path(config.__file__).resolve().parent / reference_path
     if not reference_path.exists():
-        sys.exit(f"Reference audio not found: {reference_path}\n"
-                 "Pass --reference or set CLONE_REFERENCE_AUDIO in config.py")
+        sys.exit(f"Reference audio not found: {reference_path}")
 
-    if args.checkpoint and not Path(args.checkpoint).exists():
-        sys.exit(f"Checkpoint not found: {args.checkpoint}")
+    if checkpoint:
+        ckpt_path = Path(checkpoint)
+        if not ckpt_path.is_absolute():
+            ckpt_path = Path(config.__file__).resolve().parent / ckpt_path
+        if not ckpt_path.exists():
+            sys.exit(f"Checkpoint not found: {ckpt_path}")
+        checkpoint = str(ckpt_path)
 
-    out_path = resolve_output(args.out, args.out_name, reference_path, default_ref)
+    out_path = resolve_output(out, out_name, reference_path, default_ref)
 
     infer(
         reference_path = reference_path,
-        ref_text       = args.ref_text.strip(),
-        gen_text       = args.text.strip(),
+        ref_text       = ref_text.strip(),
+        gen_text       = gen_text.strip(),
         out_path       = out_path,
-        checkpoint     = args.checkpoint,
-        speed          = args.speed,
-        seed           = args.seed,
-        nfe_steps      = args.nfe_steps,
+        checkpoint     = checkpoint,
+        speed          = speed,
+        seed           = seed,
+        nfe_steps      = nfe_steps,
         t_script_start = t_script_start,
     )
 
