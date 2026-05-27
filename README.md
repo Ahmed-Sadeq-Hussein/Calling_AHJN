@@ -518,3 +518,18 @@ JSON files placed in `Voice_configuration/` store all settings for a specific cl
 | `speed` | float | Speech speed multiplier. 0.9 = slower, 1.1 = faster. Default 1.0. |
 | `seed` | int | RNG seed for reproducible generation. -1 = random. Default -1. |
 | `nfe_steps` | int | Number of diffusion steps. 16 = fast, 32 = best quality. Default 32. |
+
+# Tacotron 2
+For the tacotron2 model, we used [Nvidia's implementation](https://github.com/NVIDIA/DeepLearningExamples/tree/master/PyTorch/SpeechSynthesis/Tacotron2#quick-start-guide).It is found in DeepLearningExamples/PyTorch/SpeechSynthesis/Tacotron2.
+
+## Training
+For training, we ran `python train.py -m Tacotron2 -o <output_file> -lr 1e-4 --epochs 476 -bs 4 --weight-decay 1e-6 --grad-clip-thresh 1.0 --cudnn-enabled --log-file nvlog.json --epochs-per-checkpoint 25 --freeze --checkpoint-path <path\to\checkpoint> --training-files=path/to/training-files --validation-files=path/to/validation-files --dataset-path path\to\dataset`. 
+
+`--checkpoint-path` is used to select a starting point to begin training from. We used `nvidia_tacotron2pyt_fp32_20190427.pt` as starting point, which was downloaded from https://catalog.ngc.nvidia.com/orgs/nvidia/models/tacotron2pyt_fp32?version=2.
+
+We added the flag `--freeze`. It can be included to freeze training on the embedding and encoder layers.
+
+## Inference
+For generating an audio using a tacotron 2 model, we ran `python inference.py --tacotron2 .\path\to\taacotron2model --waveglow .\path\to\waveglowmodel --wn-channels 256 -o <output_file> -i .\path\to\input-text`.
+
+`--waveglow` specifies which waveglow model to use. We used `waveglow_1076430_14000_amp.pt`, which was downloaded from https://catalog.ngc.nvidia.com/orgs/nvidia/teams/adlr/models/waveglow?version=WaveGlow-LJS_256_Channels.
