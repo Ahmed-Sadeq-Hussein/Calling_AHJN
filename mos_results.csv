@@ -1,0 +1,14 @@
+clip,clip_number,MOS_norm,SMOS_norm,PSMOS_norm,overall_norm
+Ash see shells,1,0.7500,1.0000,1.0000,0.9167
+Ahmed_2_crossexamination,7,0.8750,0.7500,0.8750,0.8333
+Ahmed_on_Ahmed_2_See shells,12,0.6250,1.0000,0.6250,0.7500
+Ash_baseline,3,0.7500,0.7500,0.6250,0.7083
+Ahmed_2_on_Ahmed_test,2,0.5000,1.0000,0.3750,0.6250
+Ash baseline F5-TTS,5,0.7500,0.3750,0.7500,0.6250
+Ahmed_crossexamination,9,0.6250,0.6250,0.5000,0.5833
+Julius see shells,11,1.0000,0.0000,0.0000,0.3333
+Ahmed_no_freeze,4,0.0000,0.6250,0.2500,0.2917
+Ahmed_freeze,6,0.0000,0.5000,0.3750,0.2917
+Ahmed_2_no_freeze,8,0.1250,0.3750,0.2500,0.2500
+Ahmed_2_freeze,13,0.0000,0.5000,0.2500,0.2500
+LJSPEECH BENCMARK,10,0.6250,0.0000,0.0000,0.2083

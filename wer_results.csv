@@ -1,0 +1,14 @@
+filename,transcription,wer,substitutions,deletions,insertions,ref_words
+Ahmed_2_crossexamination.wav,The smooth planks she sells seashells by the seashore shell she sells are great,0.3636,1,0,3,11
+Ahmed_2_freeze.wav,"She sells seashells by the seashore, shells seashells are great.",0.1818,1,1,0,11
+Ahmed_2_no_freeze.wav,"She sells seashells by the seashore, shells she sells are great.",0.0000,0,0,0,11
+Ahmed_2_on_Ahmed_test.wav,The smooth planks she sells seashells by the seashore shells she sells are great,0.2727,0,0,3,11
+Ahmed_crossexamination.wav,She sells seashells by the seashore shells she sells are great,0.0000,0,0,0,11
+Ahmed_freeze.wav,"She sells seashells by the seashore, shells seashells are great.",0.1818,1,1,0,11
+Ahmed_no_freeze.wav,"She sells seashells by the seashore, shells seashells are great.",0.1818,1,1,0,11
+Ahmed_on_Ahmed_2_See shells.wav,She sells seashells by the seashore shells she sells are great,0.0000,0,0,0,11
+Ash baseline F5-TTS.wav,She sells seashells by the seashore shells. She sells are great,0.0000,0,0,0,11
+Ash see shells.mp3,She sells seashells by the sea shore. Shells she sells are great.,0.1818,1,0,1,11
+Ash_baseline.wav,Helps to pass the evening. She sells seashells by the seashore. Shells she sells are great.,0.4545,0,0,5,11
+Julius see shells.mp3,She sells seashells by the seashore shells. She sells are great,0.0000,0,0,0,11
+LJSPEECH BENCMARK.wav,She sells seashells by the seashore. Shells she sells are great.,0.0000,0,0,0,11

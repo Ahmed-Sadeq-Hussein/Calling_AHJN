@@ -300,9 +300,10 @@ def main() -> None:
             writer.writerow([label, hyp, f"{wer:.4f}", s, d, i, ref_len])
     print(f"  CSV saved : {csv_path}")
 
-    # ── Save bar chart ─────────────────────────────────────────────────────────
-    labels = [r[0] for r in results]
-    wers   = [r[2] for r in results]
+    # ── Save bar chart (sorted best → worst WER) ──────────────────────────────
+    results_sorted = sorted(results, key=lambda r: r[2])
+    labels = [r[0] for r in results_sorted]
+    wers   = [r[2] for r in results_sorted]
     png_path = folder / "wer_results.png"
     save_bar_chart(labels, wers, png_path, args.text)
 

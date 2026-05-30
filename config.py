@@ -1,5 +1,5 @@
 # CALLING AHJIN — Brought to you by Ahmed Hussein and Julius Norén from JTH.
-
+# NOTE : a lot of what was written in config is not relevant due to us chifting to a Json config file system. 
 from pathlib import Path
 
 # ── Project root (everything is relative to this file) ────────────────────────

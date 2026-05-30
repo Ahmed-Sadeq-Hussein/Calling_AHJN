@@ -6,6 +6,7 @@ blind_test.py
 Copies every audio from Cross_Examination into a new Test/ folder
 with randomised numerical names (1.wav, 2.wav, ...) so you can
 listen without knowing which model produced which clip.
+This was created mainly to ease use of testing.
 
 A key file is saved so you can reveal the answers afterwards:
     Test/key.txt   — maps each number back to the original filename

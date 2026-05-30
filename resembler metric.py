@@ -36,6 +36,7 @@ import os
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import sys
+import argparse
 from pathlib import Path
 
 import numpy as np
@@ -104,7 +105,57 @@ def build_similarity_matrix(encoder: VoiceEncoder, files: list[Path], folder: Pa
         sys.exit("Fewer than 2 files could be embedded — nothing to compare.")
     E = np.vstack(embeddings)            # (N, 256), already unit vectors
     S = E @ E.T                          # (N, N) cosine similarities
-    return labels, S
+    return labels, S, E
+
+
+def draw_reference_bar(ref_label: str, labels: list[str], similarities: list[float],
+                       threshold: float, out_path: Path) -> None:
+    """Bar chart of every clip's similarity to the primary reference, sorted high to low."""
+    # Sort descending by similarity
+    pairs = sorted(zip(labels, similarities), key=lambda x: x[1], reverse=True)
+    sorted_labels, sorted_sims = zip(*pairs)
+
+    n = len(sorted_labels)
+    colors = ["#2ecc71" if s >= threshold else "#e74c3c" for s in sorted_sims]
+
+    fig, ax = plt.subplots(figsize=(max(8, n * 1.4), 5))
+    x = np.arange(n)
+    bars = ax.bar(x, sorted_sims, color=colors, edgecolor="white", linewidth=0.8, zorder=3)
+
+    # Value labels on each bar
+    for bar, s in zip(bars, sorted_sims):
+        ax.text(bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + 0.008,
+                f"{s:.3f}",
+                ha="center", va="bottom", fontsize=9, fontweight="bold")
+
+    # Threshold line
+    ax.axhline(threshold, color="#f39c12", linewidth=1.8, linestyle="--",
+               label=f"Threshold ({threshold:.2f})", zorder=4)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(sorted_labels, rotation=30, ha="right", fontsize=9)
+    ax.set_ylabel("Cosine Similarity", fontsize=12)
+    ax.set_ylim(0, 1.08)
+    ax.set_title(f"Similarity to Primary Reference: {ref_label}\n"
+                 f"Ordered most → least similar",
+                 fontsize=11, pad=12)
+    ax.yaxis.grid(True, linestyle="--", alpha=0.4, zorder=0)
+    ax.set_axisbelow(True)
+
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor="#2ecc71", label=f"≥ threshold (same speaker)"),
+        Patch(facecolor="#e74c3c", label=f"< threshold (different speaker)"),
+    ]
+    legend_elements.append(plt.Line2D([0], [0], color="#f39c12", linewidth=1.8,
+                                       linestyle="--", label=f"Threshold ({threshold:.2f})"))
+    ax.legend(handles=legend_elements, fontsize=9, loc="upper right")
+
+    plt.tight_layout()
+    fig.savefig(str(out_path), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Wrote {out_path}")
 
 
 def save_csv(labels, S, out_path: Path) -> None:
@@ -155,7 +206,20 @@ def draw_heatmap(labels, S, threshold: float, out_path: Path) -> None:
 
 
 def main() -> None:
-    folder = resolve_folder()
+    parser = argparse.ArgumentParser(
+        description="Speaker similarity heatmap + optional ranked bar chart")
+    parser.add_argument(
+        "--reference", default=None, metavar="FILENAME",
+        help="Primary reference audio (filename inside the folder, or full path). "
+             "When set, generates a bar chart ranking all other clips by similarity to it.")
+    parser.add_argument(
+        "--folder", default=None, metavar="PATH",
+        help="Override the folder to analyse (default: config.cross_examination_folder).")
+    args = parser.parse_args()
+
+    folder = Path(args.folder).resolve() if args.folder else resolve_folder()
+    if not folder.is_dir():
+        sys.exit(f"Folder not found: {folder}")
     threshold = float(config.Resemble_threshold)
     files = collect_audio(folder)
     print(f"Folder    : {folder}")
@@ -163,7 +227,7 @@ def main() -> None:
     print(f"Files     : {len(files)}\n")
 
     encoder = VoiceEncoder()
-    labels, S = build_similarity_matrix(encoder, files, folder)
+    labels, S, E = build_similarity_matrix(encoder, files, folder)
 
     csv_path = folder / "speaker_similarity_matrix.csv"
     png_path = folder / "speaker_similarity_heatmap.png"
@@ -172,6 +236,32 @@ def main() -> None:
 
     print(f"\nWrote {png_path}")
     print(f"Wrote {csv_path}")
+
+    # ── Optional ranked bar chart against a primary reference ─────────────────
+    if args.reference:
+        ref_path = Path(args.reference)
+        if not ref_path.is_absolute():
+            ref_path = (folder / args.reference).resolve()
+
+        if ref_path.name in labels:
+            # Reference is already embedded in the matrix — use its row
+            ref_idx = labels.index(ref_path.name)
+            other_labels = [l for i, l in enumerate(labels) if i != ref_idx]
+            other_sims   = [float(S[ref_idx, i]) for i in range(len(labels)) if i != ref_idx]
+            ref_label    = ref_path.name
+        else:
+            # Reference is an external file — embed it separately
+            if not ref_path.exists():
+                print(f"WARNING: reference file not found: {ref_path} — skipping bar chart.")
+            else:
+                print(f"\nEmbedding external reference: {ref_path.name} …")
+                ref_emb    = encoder.embed_utterance(load_waveform(ref_path))
+                other_sims = (E @ ref_emb).tolist()
+                other_labels = labels
+                ref_label    = ref_path.name
+
+        bar_path = folder / "speaker_similarity_bar.png"
+        draw_reference_bar(ref_label, other_labels, other_sims, threshold, bar_path)
 
 
 if __name__ == "__main__":
