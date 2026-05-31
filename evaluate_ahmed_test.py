@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# CALLING AHJIN — Brought to you by Ahmed Hussein and Julius Norén from JTH.
+# CALLING AHJIN Brought to you by Ahmed Hussein and Julius Norén from JTH.
+
 """
 evaluate_ahmed_test.py
 ----------------------
